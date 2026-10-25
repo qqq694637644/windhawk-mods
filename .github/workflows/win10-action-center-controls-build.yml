@@ -54,9 +54,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $out = Join-Path $env:RUNNER_TEMP 'compiled'
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /target:exe /optimize+ /platform:x64 "/out:$(Join-Path $out 'win10-controls-helper.exe')" /reference:System.Management.dll /reference:System.Windows.Forms.dll tools/win10_action_center_helper.cs tools/win10_action_center_broker.cs
+          $helper = Join-Path (Get-Location).Path 'tools/win10_action_center_helper.cs'
+          $broker = Join-Path (Get-Location).Path 'tools/win10_action_center_broker.cs'
+          $exe = Join-Path $out 'win10-controls-helper.exe'
+          & $csc /nologo /target:exe /optimize+ /platform:x64 "/out:$exe" /reference:System.Management.dll /reference:System.Windows.Forms.dll $helper $broker
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $out 'win10-controls-helper.exe') self-test
+          & $exe self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check built file signatures and hashes
