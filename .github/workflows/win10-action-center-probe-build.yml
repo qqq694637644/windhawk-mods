@@ -1,0 +1,65 @@
+name: Win10 Action Center probe - build only
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gpt/win10-action-center-probe
+    paths:
+      - "mods/win10-action-center-injection-probe.wh.cpp"
+      - ".github/workflows/win10-action-center-probe-build.yml"
+      - "scripts/compile_mod.py"
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Compile probe with Windhawk 1.7.3
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Extract official Windhawk compiler on ephemeral runner
+        run: |
+          set -euo pipefail
+          installer_url="https://github.com/ramensoftware/windhawk/releases/download/v1.7.3/windhawk_setup.exe"
+          installer_path="${{ runner.temp }}/windhawk_setup.exe"
+          extract_path="${{ runner.temp }}\windhawk"
+          curl -fL --retry 3 "$installer_url" -o "$installer_path"
+          MSYS_NO_PATHCONV=1 "$installer_path" /S /PORTABLE "/D=$extract_path"
+
+      - name: Compile diagnostics-only mod
+        run: |
+          set -euo pipefail
+          python -u scripts/compile_mod.py \
+            -w "${{ runner.temp }}\windhawk" \
+            -f mods/win10-action-center-injection-probe.wh.cpp \
+            -o32 "${{ runner.temp }}\probe_32.dll" \
+            -o64 "${{ runner.temp }}\probe_64.dll" \
+            -oarm64 "${{ runner.temp }}\probe_arm64.dll"
+
+      - name: Verify x64 artifact exists
+        run: |
+          test -s "${{ runner.temp }}/probe_64.dll"
+          ls -lh "${{ runner.temp }}/probe_64.dll"
+          echo "Build-only verification complete; no mod was loaded"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win10-action-center-probe-x64
+          path: ${{ runner.temp }}/probe_64.dll
+          if-no-files-found: error
