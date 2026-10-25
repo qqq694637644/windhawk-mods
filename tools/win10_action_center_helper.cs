@@ -9,6 +9,7 @@ using System;
 using System.Globalization;
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 internal static class Win10ActionCenterHelper
 {
@@ -205,6 +206,34 @@ internal static class Win10ActionCenterHelper
 
     internal static void WriteBrightness(byte brightness)
     {
+        // Do not reuse WMI objects across Modern Standby/display recovery.
+        // Every attempt gets a fresh provider handle and verifies readback.
+        Exception last = null;
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                WriteBrightnessOnce(brightness);
+                Thread.Sleep(110);
+                byte actual = ReadBrightness();
+                if (Math.Abs((int)actual - brightness) <= 2)
+                {
+                    Console.WriteLine("BRIGHTNESS_VERIFIED=" + actual);
+                    return;
+                }
+                throw new InvalidOperationException("Brightness readback differs");
+            }
+            catch (Exception error)
+            {
+                last = error;
+                if (attempt < 2) Thread.Sleep(150 * (attempt + 1));
+            }
+        }
+        throw new InvalidOperationException("Brightness unavailable after three attempts", last);
+    }
+
+    private static void WriteBrightnessOnce(byte brightness)
+    {
         ManagementScope scope = ConnectWmi();
         using (var searcher = new ManagementObjectSearcher(scope,
             new ObjectQuery("SELECT * FROM WmiMonitorBrightnessMethods")))
@@ -227,7 +256,6 @@ internal static class Win10ActionCenterHelper
                         if (code != 0)
                             throw new InvalidOperationException("WmiSetBrightness failed: " + code);
                     }
-                    Console.WriteLine("BRIGHTNESS_WRITE_ACCEPTED=" + brightness);
                     return;
                 }
             }
