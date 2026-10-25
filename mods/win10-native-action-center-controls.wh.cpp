@@ -31,8 +31,10 @@ host until XAML insertion has been validated on a disposable Win10 VM.
 // ==/WindhawkModReadme==
 
 #include <windows.h>
+#undef GetCurrentTime
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -303,7 +305,7 @@ static bool AttachUi() {
         card.VerticalAlignment(wux::VerticalAlignment::Bottom);
         card.Background(wuxm::SolidColorBrush(
             winrt::Windows::UI::Color{246, 38, 42, 51}));
-        wuxc::Panel::SetZIndex(card, 200);
+        wuxc::Canvas::SetZIndex(card, 200);
 
         card.Children().Append(Label(L"亮度（独立控制）"));
         wuxc::Slider slider;
