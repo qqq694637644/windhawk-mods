@@ -64,15 +64,15 @@ jobs:
           path: ${{ runner.temp }}/probe_64.dll
           if-no-files-found: error
 
-      - name: Package portable runtime for separately configured local test
+      - name: Package minimal headless runtime for local test
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $source = Join-Path '${{ runner.temp }}' 'windhawk'
-          $stage = Join-Path '${{ runner.temp }}' 'windhawk-runtime-stage'
-          $archive = Join-Path '${{ runner.temp }}' 'windhawk-portable-runtime.zip'
+          $stage = Join-Path '${{ runner.temp }}' 'windhawk-headless-stage'
+          $archive = Join-Path '${{ runner.temp }}' 'windhawk-headless-runtime.zip'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          foreach ($name in @('windhawk.exe', 'windhawk-x64-helper.exe', 'windhawk.ini', 'Engine', 'UI', 'AppData')) {
+          foreach ($name in @('windhawk.exe', 'windhawk-x64-helper.exe', 'windhawk.ini', 'Engine', 'AppData')) {
             $src = Join-Path $source $name
             if (Test-Path -LiteralPath $src) {
               Copy-Item -LiteralPath $src -Destination $stage -Recurse -Force
@@ -82,14 +82,14 @@ jobs:
               throw "Mandatory runtime component missing: $name"
             }
           }
-          # Deliberately exclude the large compiler: our probe is already compiled.
+          # Exclude the GUI and compiler: headless -tray-only test uses neither.
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -CompressionLevel Optimal -Force
           Get-Item $archive | Select-Object FullName,Length | Format-List
           Write-Output 'Portable runtime was packaged but never started'
 
-      - name: Upload portable runtime without compiler
+      - name: Upload minimal portable runtime
         uses: actions/upload-artifact@v4
         with:
-          name: windhawk-1-7-3-portable-runtime
-          path: ${{ runner.temp }}/windhawk-portable-runtime.zip
+          name: windhawk-1-7-3-headless-runtime
+          path: ${{ runner.temp }}/windhawk-headless-runtime.zip
           if-no-files-found: error
