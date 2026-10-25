@@ -1,0 +1,80 @@
+name: Build Windows 10 native Action Center controls
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gpt/win10-action-center-probe
+    paths:
+      - "mods/win10-native-action-center-controls.wh.cpp"
+      - "tools/win10_action_center_helper.cs"
+      - "tools/win10_action_center_broker.cs"
+      - "tools/README-win10-action-center-controls.md"
+      - ".github/workflows/win10-action-center-controls-build.yml"
+      - "scripts/compile_mod.py"
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Build Windhawk x64 mod and user broker
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Windhawk 1.7.3 compiler to ephemeral Windows runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'windhawk_setup.exe'
+          $target = Join-Path $env:RUNNER_TEMP 'WindhawkCompiler'
+          curl.exe --fail --location --retry 3 --output $installer 'https://github.com/ramensoftware/windhawk/releases/download/v1.7.3/windhawk_setup.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $proc = Start-Process $installer -PassThru -Wait -ArgumentList @('/S', '/PORTABLE', "/D=$target")
+          if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
+          if (!(Test-Path (Join-Path $target 'Compiler'))) { throw 'Windhawk compiler unavailable' }
+
+      - name: Compile native XAML mod without loading it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'WindhawkCompiler'
+          $out = Join-Path $env:RUNNER_TEMP 'compiled'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          python scripts/compile_mod.py -w $target -f mods/win10-native-action-center-controls.wh.cpp -o32 (Join-Path $out 'native-controls-x86.dll') -o64 (Join-Path $out 'native-controls-x64.dll') -oarm64 (Join-Path $out 'native-controls-arm64.dll')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path (Join-Path $out 'native-controls-x64.dll'))) { throw 'Missing x64 mod' }
+
+      - name: Build desktop-user settings helper
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'compiled'
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:exe /optimize+ /platform:x64 "/out:$(Join-Path $out 'win10-controls-helper.exe')" /reference:System.Management.dll /reference:System.Windows.Forms.dll tools/win10_action_center_helper.cs tools/win10_action_center_broker.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $out 'win10-controls-helper.exe') self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check built file signatures and hashes
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'compiled'
+          foreach ($filename in @('native-controls-x64.dll', 'win10-controls-helper.exe')) {
+            $path = Join-Path $out $filename
+            $data = [IO.File]::ReadAllBytes($path)
+            if ($data[0] -ne 0x4D -or $data[1] -ne 0x5A) { throw "$filename invalid MZ header" }
+            $file = Get-Item $path
+            $hash = Get-FileHash $path -Algorithm SHA256
+            Write-Output "$filename bytes=$($file.Length) sha256=$($hash.Hash)"
+          }
+          Write-Output 'Build-only verification: no injection and no settings writes'
+
+      - name: Upload build-only artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: win10-native-action-center-controls-build-only
+          path: ${{ runner.temp }}/compiled/*
+          if-no-files-found: error
