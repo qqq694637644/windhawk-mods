@@ -25,7 +25,8 @@
 - tools/win10_action_center_broker.cs：
   在普通桌面用户会话运行的不可见 broker，处理 WM_COPYDATA 请求。
 - .github/workflows/win10-action-center-controls-build.yml：
-  Windows GitHub Runner 编译 DLL 和辅助 EXE，绝不加载 Shell DLL。
+  Windows GitHub Runner 编译 DLL、辅助 EXE，并依照 Windhawk 官方规则
+  打包 x64 C++ 运行库，绝不加载 Shell DLL。
 
 ShellExperienceHost.exe 属于 Windows AppContainer。为了不在其 UI 线程执行
 WMI 操作，本实现使用独立非管理员桌面 broker。客户端发固定长度的
@@ -44,8 +45,11 @@ AppContainer 到 broker 的跨进程调用，仍需要运行时验证。
 
 隔离测试部署步骤：
 
-1. 从 GitHub Actions Artifact 获取 native-controls-x64.dll 和
-   win10-controls-helper.exe。
+1. 从 GitHub Actions Artifact 获取 native-controls-x64.dll、
+   win10-controls-helper.exe、libc++.whl、libunwind.whl 和
+   windhawk-mod-shim.dll。三个运行库要与模组 DLL 一起放入
+   Windhawk Engine/Mods/64 目录；缺少前两个时会导致 0x8007007E，
+   即使模组 DLL 本身已编译成功。
 2. 在相同的已登录用户会话，以非管理员身份运行
    win10-controls-helper.exe broker。此程序没有可见 UI，也不安装自启动。
 3. 运行 win10-controls-helper.exe broker-readonly-smoke，验证只读 IPC。

@@ -49,6 +49,31 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path (Join-Path $out 'native-controls-x64.dll'))) { throw 'Missing x64 mod' }
 
+      - name: Package Windhawk C++ runtime DLLs with the x64 mod
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Windhawk's official compilerUtils.copyCompilerLibs places these
+          # x64 compiler runtime DLLs in Engine/Mods/64 with .whl filenames.
+          # A bare DLL without them passes compilation but cannot load into
+          # ShellExperienceHost (ERROR_MOD_NOT_FOUND, 0x8007007E).
+          $target = Join-Path $env:RUNNER_TEMP 'WindhawkCompiler'
+          $compilerBin = Join-Path $target 'Compiler/x86_64-w64-mingw32/bin'
+          $out = Join-Path $env:RUNNER_TEMP 'compiled'
+          $renames = @(
+            @('libc++.dll', 'libc++.whl'),
+            @('libunwind.dll', 'libunwind.whl'),
+            @('windhawk-mod-shim.dll', 'windhawk-mod-shim.dll')
+          )
+          foreach ($pair in $renames) {
+            $source = Join-Path $compilerBin $pair[0]
+            $destination = Join-Path $out $pair[1]
+            if (!(Test-Path -LiteralPath $source)) {
+              throw "Required Windhawk x64 runtime dependency missing: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination $destination
+            Write-Output "Packaged $($pair[0]) as $($pair[1])"
+          }
+
       - name: Build desktop-user settings helper
         run: |
           $ErrorActionPreference = 'Stop'
@@ -65,7 +90,7 @@ jobs:
       - name: Check built file signatures and hashes
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'compiled'
-          foreach ($filename in @('native-controls-x64.dll', 'win10-controls-helper.exe')) {
+          foreach ($filename in @('native-controls-x64.dll', 'win10-controls-helper.exe', 'libc++.whl', 'libunwind.whl', 'windhawk-mod-shim.dll')) {
             $path = Join-Path $out $filename
             $data = [IO.File]::ReadAllBytes($path)
             if ($data[0] -ne 0x4D -or $data[1] -ne 0x5A) { throw "$filename invalid MZ header" }
