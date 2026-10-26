@@ -14,8 +14,10 @@
   返回 WMI 操作失败（状态码 4）时，才在原生操作中心的 XAML UI 线程
   尝试 GetForCurrentView / SetBrightnessLevel / StartOverride。
   检查 IsOverrideActive 后再尝试 SaveForSystemAsync；此方法需要
-  systemManagement 受限权限，不能保证永久保存。如覆盖有效但保存
-  不被授权，明确显示仅临时生效。测试代理状态码 5 绝不触发此备用通道。
+  systemManagement 受限权限。经实机读取确认，当前 ShellExperienceHost
+  的 AppxManifest.xml **并未声明这项权限**，因此不应指望永久保存。
+  如覆盖有效但保存不被授权，明确显示仅临时生效。测试代理状态码 5
+  绝不触发此备用通道。
 - **统一屏幕关闭时间**：1、2、3、5、10、15、20、30、60、120 分钟和“从不”。
   选择一次同时更新当前电源方案的 AC 与 DC VIDEOIDLE 设置，
   然后调用 PowerSetActiveScheme 应用并验证。不改变睡眠时间。
@@ -91,7 +93,18 @@ $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
 首版叠加布局曾遮挡原生快捷操作；已替换为 Grid 预留自动高度行，并且
 在 Surface 实机截图确认不再遮挡。仍需要长时间运行与多次睡眠恢复验证。
-完整的系统亮度硬件写入与统一 AC/DC 时间真实修改尚未确认成功。
+2026-10-26 进一步完成了真实 AC/DC Power API 测试：先将当前
+AC=DC=0（从不）原值写回并读回验证；随后将 AC/DC 临时设置为 7200 秒
+（2 小时），读回两者均为 7200 秒，并在同一条本机命令的 finally
+清理阶段恢复 AC=DC=0。两轮测试都未改变锁屏熄屏时间
+（AC=DC=30 秒）、活动电源方案（平衡），Shell 保持响应。
+**普通用户 broker 对 Windows Power API 的端到端实际写入尚未实测**；
+以上真实写入是通过同一辅助程序的命令行接口完成的。
+
+WinRT 备用方案已提交至测试分支（GitHub Actions run 40268477416 成功），
+并通过原生操作中心的只读代理实机回归：亮度调整请求被 status=5 拒绝，
+且没有启动任何 WinRT 写入。真正调用 StartOverride 后的硬件亮度效果
+尚未验证；系统亮度长期可用性不应宣称已解决。
 
 不能将一轮零 Hook 注入成功等同于长时间运行稳定。
 当 ShellExperienceHost 因生命周期管理被挂起时，远程线程创建成功
