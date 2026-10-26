@@ -87,8 +87,10 @@ static uint64_t g_uiGeneration = 0;
 
 static winrt::weak_ref<wuxc::Grid> g_target;
 static winrt::weak_ref<wuxc::StackPanel> g_card;
-static winrt::weak_ref<wuxc::RowDefinition> g_reservationRow;
-static winrt::weak_ref<wuxc::RowDefinition> g_fallbackNativeRow;
+// Keep the specific added rows alive until they have been detached. Otherwise
+// a vanished weak reference can leave a permanent empty Grid row behind.
+static wuxc::RowDefinition g_reservationRow{nullptr};
+static wuxc::RowDefinition g_fallbackNativeRow{nullptr};
 static winrt::weak_ref<wuxc::Slider> g_slider;
 static winrt::weak_ref<wuxc::ComboBox> g_combo;
 static winrt::weak_ref<wuxc::CheckBox> g_lockCheckbox;
@@ -223,6 +225,12 @@ static void OnUiTick() {
             if (data.ac >= 0 && data.dc >= 0 && data.ac != data.dc)
                 message += L" · 当前 AC/DC 不一致，选一次即可统一";
             label.Text(winrt::hstring(message));
+            Wh_Log(L"Feedback TextBlock updated at generation=%llu, length=%u",
+                   static_cast<unsigned long long>(data.generation),
+                   static_cast<unsigned>(label.Text().size()));
+        } else {
+            Wh_Log(L"Feedback TextBlock missing at generation=%llu",
+                   static_cast<unsigned long long>(data.generation));
         }
         if (auto slider = g_slider.get()) {
             if (data.brightness >= 0 &&
@@ -254,7 +262,11 @@ static void OnUiTick() {
                 g_updatingUi = false;
             }
         }
-    } catch (...) { g_updatingUi = false; }
+    } catch (...) {
+        g_updatingUi = false;
+        Wh_Log(L"Native controls UI refresh failed with HRESULT=0x%08X",
+               static_cast<unsigned>(winrt::to_hresult().value));
+    }
 }
 
 static void RemoveUi() {
@@ -264,34 +276,60 @@ static void RemoveUi() {
             g_timer.Tick(g_timerToken);
             g_timer = nullptr;
         }
-        if (auto slider = g_slider.get())
-            slider.ValueChanged(g_sliderToken);
-        if (auto combo = g_combo.get())
-            combo.SelectionChanged(g_comboToken);
-        if (auto parent = g_target.get()) {
+    } catch (...) {
+        Wh_Log(L"Native controls timer cleanup reported an exception");
+    }
+    try {
+        if (auto slider = g_slider.get()) slider.ValueChanged(g_sliderToken);
+    } catch (...) {
+        Wh_Log(L"Native controls slider handler cleanup reported an exception");
+    }
+    try {
+        if (auto combo = g_combo.get()) combo.SelectionChanged(g_comboToken);
+    } catch (...) {
+        Wh_Log(L"Native controls selector handler cleanup reported an exception");
+    }
+    if (auto parent = g_target.get()) {
+        Wh_Log(L"Native controls cleanup beginning: rows=%u, children=%u",
+               parent.RowDefinitions().Size(), parent.Children().Size());
+        try {
             if (auto card = g_card.get()) {
                 uint32_t pos = 0;
                 if (parent.Children().IndexOf(card, pos))
                     parent.Children().RemoveAt(pos);
             }
-            if (auto row = g_reservationRow.get()) {
-                uint32_t pos = 0;
-                if (parent.RowDefinitions().IndexOf(row, pos))
-                    parent.RowDefinitions().RemoveAt(pos);
-            }
-            if (auto row = g_fallbackNativeRow.get()) {
-                uint32_t pos = 0;
-                if (parent.RowDefinitions().IndexOf(row, pos))
-                    parent.RowDefinitions().RemoveAt(pos);
-            }
+        } catch (...) {
+            Wh_Log(L"Native controls card removal reported an exception");
         }
-    } catch (...) {}
+        try {
+            if (g_reservationRow) {
+                uint32_t pos = 0;
+                if (parent.RowDefinitions().IndexOf(g_reservationRow, pos))
+                    parent.RowDefinitions().RemoveAt(pos);
+            }
+        } catch (...) {
+            Wh_Log(L"Native controls reserved row removal reported an exception");
+        }
+        try {
+            if (g_fallbackNativeRow) {
+                uint32_t pos = 0;
+                if (parent.RowDefinitions().IndexOf(g_fallbackNativeRow, pos))
+                    parent.RowDefinitions().RemoveAt(pos);
+            }
+        } catch (...) {
+            Wh_Log(L"Native controls fallback row removal reported an exception");
+        }
+        Wh_Log(L"Native controls cleanup finished: rows=%u, children=%u",
+               parent.RowDefinitions().Size(), parent.Children().Size());
+    } else {
+        Wh_Log(L"Native controls cleanup skipped: native Grid no longer exists");
+    }
     g_slider = {};
     g_combo = {};
     g_card = {};
     g_target = {};
-    g_reservationRow = {};
-    g_fallbackNativeRow = {};
+    g_reservationRow = nullptr;
+    g_fallbackNativeRow = nullptr;
     g_feedback = {};
     g_lockCheckbox = {};
     g_attached.store(false);
@@ -375,12 +413,12 @@ static bool AttachUi() {
             wuxc::RowDefinition nativeRow;
             nativeRow.Height(wux::GridLength{1.0, wux::GridUnitType::Star});
             target.RowDefinitions().Append(nativeRow);
-            g_fallbackNativeRow = winrt::make_weak(nativeRow);
+            g_fallbackNativeRow = nativeRow;
         }
         wuxc::RowDefinition reservedRow;
         reservedRow.Height(wux::GridLength{0.0, wux::GridUnitType::Auto});
         target.RowDefinitions().Append(reservedRow);
-        g_reservationRow = winrt::make_weak(reservedRow);
+        g_reservationRow = reservedRow;
         wuxc::Grid::SetRow(card, target.RowDefinitions().Size() - 1);
         const auto columns = target.ColumnDefinitions().Size();
         if (columns) wuxc::Grid::SetColumnSpan(card, columns);
@@ -568,7 +606,10 @@ void Wh_ModUninit() {
     g_stopping.store(true);
     if (g_worker.joinable()) g_worker.join();
     HWND hwnd = g_window.load();
-    if (hwnd && IsWindow(hwnd))
-        RunOnUiThread(hwnd, [] { RemoveUi(); });
+    if (hwnd && IsWindow(hwnd)) {
+        const bool detached = RunOnUiThread(hwnd, [] { RemoveUi(); });
+        Wh_Log(L"Native controls UI-thread detach callback completed=%d",
+               detached ? 1 : 0);
+    }
     Wh_Log(L"Native Win10 controls unloaded");
 }
