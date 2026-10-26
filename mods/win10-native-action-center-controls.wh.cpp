@@ -86,15 +86,18 @@ static Status g_status;
 static uint64_t g_uiGeneration = 0;
 
 static winrt::weak_ref<wuxc::Grid> g_target;
-static winrt::weak_ref<wuxc::StackPanel> g_card;
+// Owned controls must have stable references until the UI-thread unload
+// callback releases them. Their weak_ref projections expired after AttachUi
+// returned, so status and readback changes never reached the visible panel.
+static wuxc::StackPanel g_card{nullptr};
 // Keep the specific added rows alive until they have been detached. Otherwise
 // a vanished weak reference can leave a permanent empty Grid row behind.
 static wuxc::RowDefinition g_reservationRow{nullptr};
 static wuxc::RowDefinition g_fallbackNativeRow{nullptr};
-static winrt::weak_ref<wuxc::Slider> g_slider;
-static winrt::weak_ref<wuxc::ComboBox> g_combo;
-static winrt::weak_ref<wuxc::CheckBox> g_lockCheckbox;
-static winrt::weak_ref<wuxc::TextBlock> g_feedback;
+static wuxc::Slider g_slider{nullptr};
+static wuxc::ComboBox g_combo{nullptr};
+static wuxc::CheckBox g_lockCheckbox{nullptr};
+static wuxc::TextBlock g_feedback{nullptr};
 static wux::DispatcherTimer g_timer{nullptr};
 static winrt::event_token g_sliderToken{}, g_comboToken{}, g_timerToken{};
 static bool g_updatingUi = false;
@@ -220,7 +223,7 @@ static void OnUiTick() {
     Wh_Log(L"Native controls UI state refresh generation=%llu",
            static_cast<unsigned long long>(data.generation));
     try {
-        if (auto label = g_feedback.get()) {
+        if (auto label = g_feedback) {
             std::wstring message = data.text;
             if (data.ac >= 0 && data.dc >= 0 && data.ac != data.dc)
                 message += L" · 当前 AC/DC 不一致，选一次即可统一";
@@ -232,7 +235,7 @@ static void OnUiTick() {
             Wh_Log(L"Feedback TextBlock missing at generation=%llu",
                    static_cast<unsigned long long>(data.generation));
         }
-        if (auto slider = g_slider.get()) {
+        if (auto slider = g_slider) {
             if (data.brightness >= 0 &&
                 g_brightnessRequest.load() == kEmpty &&
                 GetTickCount64() - g_brightnessChangeTick.load() > 1500) {
@@ -242,7 +245,7 @@ static void OnUiTick() {
             }
             slider.IsEnabled(true);
         }
-        if (auto combo = g_combo.get()) {
+        if (auto combo = g_combo) {
             if (data.ac >= 0 && data.dc >= 0 &&
                 g_timeoutRequest.load() == kEmpty) {
                 int index = -1;
@@ -280,12 +283,12 @@ static void RemoveUi() {
         Wh_Log(L"Native controls timer cleanup reported an exception");
     }
     try {
-        if (auto slider = g_slider.get()) slider.ValueChanged(g_sliderToken);
+        if (auto slider = g_slider) slider.ValueChanged(g_sliderToken);
     } catch (...) {
         Wh_Log(L"Native controls slider handler cleanup reported an exception");
     }
     try {
-        if (auto combo = g_combo.get()) combo.SelectionChanged(g_comboToken);
+        if (auto combo = g_combo) combo.SelectionChanged(g_comboToken);
     } catch (...) {
         Wh_Log(L"Native controls selector handler cleanup reported an exception");
     }
@@ -293,7 +296,7 @@ static void RemoveUi() {
         Wh_Log(L"Native controls cleanup beginning: rows=%u, children=%u",
                parent.RowDefinitions().Size(), parent.Children().Size());
         try {
-            if (auto card = g_card.get()) {
+            if (auto card = g_card) {
                 uint32_t pos = 0;
                 if (parent.Children().IndexOf(card, pos))
                     parent.Children().RemoveAt(pos);
@@ -324,14 +327,14 @@ static void RemoveUi() {
     } else {
         Wh_Log(L"Native controls cleanup skipped: native Grid no longer exists");
     }
-    g_slider = {};
-    g_combo = {};
-    g_card = {};
+    g_slider = nullptr;
+    g_combo = nullptr;
+    g_card = nullptr;
     g_target = {};
     g_reservationRow = nullptr;
     g_fallbackNativeRow = nullptr;
-    g_feedback = {};
-    g_lockCheckbox = {};
+    g_feedback = nullptr;
+    g_lockCheckbox = nullptr;
     g_attached.store(false);
 }
 
@@ -422,13 +425,13 @@ static bool AttachUi() {
         wuxc::Grid::SetRow(card, target.RowDefinitions().Size() - 1);
         const auto columns = target.ColumnDefinitions().Size();
         if (columns) wuxc::Grid::SetColumnSpan(card, columns);
-        g_card = winrt::make_weak(card);
+        g_card = card;
         target.Children().Append(card);
 
-        g_slider = winrt::make_weak(slider);
-        g_combo = winrt::make_weak(combo);
-        g_lockCheckbox = winrt::make_weak(check);
-        g_feedback = winrt::make_weak(feedback);
+        g_slider = slider;
+        g_combo = combo;
+        g_lockCheckbox = check;
+        g_feedback = feedback;
 
         g_sliderToken = slider.ValueChanged(
             [](wf::IInspectable const&, wuxp::RangeBaseValueChangedEventArgs const& ev) {
@@ -448,7 +451,7 @@ static bool AttachUi() {
                     const int seconds = winrt::unbox_value<int32_t>(item.Tag());
                     if (seconds < 0 || seconds > 86400) return;
                     uint32_t sync = 0;
-                    if (auto check = g_lockCheckbox.get()) {
+                    if (auto check = g_lockCheckbox) {
                         auto checked = check.IsChecked();
                         if (checked && checked.Value()) sync = 1;
                     }
