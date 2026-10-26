@@ -35,6 +35,7 @@ host until XAML insertion has been validated on a disposable Win10 VM.
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -51,6 +52,7 @@ host until XAML insertion has been validated on a disposable Win10 VM.
 #include <utility>
 
 namespace wf = winrt::Windows::Foundation;
+namespace wgd = winrt::Windows::Graphics::Display;
 namespace wux = winrt::Windows::UI::Xaml;
 namespace wuxc = winrt::Windows::UI::Xaml::Controls;
 namespace wuxp = winrt::Windows::UI::Xaml::Controls::Primitives;
@@ -343,6 +345,22 @@ static bool AttachUi() {
     try {
         auto window = wux::Window::Current();
         if (!window || !window.Content()) return false;
+
+        // Read-only capability probe. The full-trust broker cannot use
+        // GetDefaultForSystem without a special systemManagement capability.
+        // The native Action Center has a CoreWindow, so GetForCurrentView
+        // might expose another supported path when WMI writes are rejected.
+        // Do not call SetBrightnessLevel or StartOverride in this test.
+        try {
+            auto brightnessApi = wgd::BrightnessOverride::GetForCurrentView();
+            Wh_Log(L"Native CoreWindow brightness override available=%d supported=%d active=%d",
+                   brightnessApi ? 1 : 0,
+                   brightnessApi && brightnessApi.IsSupported() ? 1 : 0,
+                   brightnessApi && brightnessApi.IsOverrideActive() ? 1 : 0);
+        } catch (...) {
+            Wh_Log(L"Native CoreWindow brightness override read-only query failed: HRESULT 0x%08X",
+                   static_cast<unsigned>(winrt::to_hresult().value));
+        }
 
         wux::FrameworkElement view{nullptr};
         int visits = 0;
