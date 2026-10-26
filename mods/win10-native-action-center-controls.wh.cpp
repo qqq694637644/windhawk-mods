@@ -96,6 +96,7 @@ static winrt::weak_ref<wuxc::TextBlock> g_feedback;
 static wux::DispatcherTimer g_timer{nullptr};
 static winrt::event_token g_sliderToken{}, g_comboToken{}, g_timerToken{};
 static bool g_updatingUi = false;
+static unsigned int g_uiTimerDiagnosticTicks = 0;
 
 static void Publish(std::wstring text, int brightness = -1,
                     int ac = -1, int dc = -1) {
@@ -214,6 +215,8 @@ static void OnUiTick() {
         data = g_status;
         g_uiGeneration = data.generation;
     }
+    Wh_Log(L"Native controls UI state refresh generation=%llu",
+           static_cast<unsigned long long>(data.generation));
     try {
         if (auto label = g_feedback.get()) {
             std::wstring message = data.text;
@@ -418,8 +421,14 @@ static bool AttachUi() {
 
         g_timer = wux::DispatcherTimer();
         g_timer.Interval(std::chrono::milliseconds(350));
+        g_uiTimerDiagnosticTicks = 0;
         g_timerToken = g_timer.Tick(
-            [](wf::IInspectable const&, wf::IInspectable const&) { OnUiTick(); });
+            [](wf::IInspectable const&, wf::IInspectable const&) {
+                if (++g_uiTimerDiagnosticTicks <= 3)
+                    Wh_Log(L"Native controls DispatcherTimer tick #%u",
+                           g_uiTimerDiagnosticTicks);
+                OnUiTick();
+            });
         g_timer.Start();
         g_attached.store(true);
         OnUiTick();
@@ -502,7 +511,11 @@ static void Worker() {
 
         uint32_t seconds = g_timeoutRequest.exchange(kEmpty);
         if (seconds != kEmpty) {
-            auto result = BrokerCall(4, seconds, g_syncLockRequest.load());
+            const uint32_t sync = g_syncLockRequest.load();
+            auto result = BrokerCall(4, seconds, sync);
+            Wh_Log(L"Unified display-off request=%u seconds, syncLock=%u, "
+                   L"broker accepted=%d",
+                   seconds, sync, result.ok ? 1 : 0);
             if (result.ok)
                 Publish(L"接电源与电池已统一设置", -1, result.a, result.b);
             else
