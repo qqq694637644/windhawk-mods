@@ -87,6 +87,8 @@ static uint64_t g_uiGeneration = 0;
 
 static winrt::weak_ref<wuxc::Grid> g_target;
 static winrt::weak_ref<wuxc::StackPanel> g_card;
+static winrt::weak_ref<wuxc::RowDefinition> g_reservationRow;
+static winrt::weak_ref<wuxc::RowDefinition> g_fallbackNativeRow;
 static winrt::weak_ref<wuxc::Slider> g_slider;
 static winrt::weak_ref<wuxc::ComboBox> g_combo;
 static winrt::weak_ref<wuxc::CheckBox> g_lockCheckbox;
@@ -269,12 +271,24 @@ static void RemoveUi() {
                 if (parent.Children().IndexOf(card, pos))
                     parent.Children().RemoveAt(pos);
             }
+            if (auto row = g_reservationRow.get()) {
+                uint32_t pos = 0;
+                if (parent.RowDefinitions().IndexOf(row, pos))
+                    parent.RowDefinitions().RemoveAt(pos);
+            }
+            if (auto row = g_fallbackNativeRow.get()) {
+                uint32_t pos = 0;
+                if (parent.RowDefinitions().IndexOf(row, pos))
+                    parent.RowDefinitions().RemoveAt(pos);
+            }
         }
     } catch (...) {}
     g_slider = {};
     g_combo = {};
     g_card = {};
     g_target = {};
+    g_reservationRow = {};
+    g_fallbackNativeRow = {};
     g_feedback = {};
     g_lockCheckbox = {};
     g_attached.store(false);
@@ -295,17 +309,22 @@ static bool AttachUi() {
         double area = 0;
         FindLargestGrid(view, target, area, 0, visits);
         if (!target) return false;
+        const auto nativeRows = target.RowDefinitions().Size();
+        Wh_Log(L"Native Action Center content grid: rows=%u, columns=%u, "
+               L"children=%u, width=%f, height=%f",
+               nativeRows, target.ColumnDefinitions().Size(),
+               target.Children().Size(),
+               target.ActualWidth(), target.ActualHeight());
 
         wuxc::StackPanel card;
         card.Name(L"WHWin10DisplaySettings");
         card.Orientation(wuxc::Orientation::Vertical);
-        card.Margin(wux::Thickness{12, 0, 12, 50});
+        card.Margin(wux::Thickness{12, 8, 12, 8});
         card.Padding(wux::Thickness{12, 10, 12, 10});
         card.HorizontalAlignment(wux::HorizontalAlignment::Stretch);
-        card.VerticalAlignment(wux::VerticalAlignment::Bottom);
+        card.VerticalAlignment(wux::VerticalAlignment::Stretch);
         card.Background(wuxm::SolidColorBrush(
             winrt::Windows::UI::Color{246, 38, 42, 51}));
-        wuxc::Canvas::SetZIndex(card, 200);
 
         card.Children().Append(Label(L"亮度（独立控制）"));
         wuxc::Slider slider;
@@ -345,14 +364,26 @@ static bool AttachUi() {
         feedback.TextWrapping(wux::TextWrapping::Wrap);
         card.Children().Append(feedback);
 
-        const auto rows = target.RowDefinitions().Size();
+        // Reserve real layout space in the existing native Action Center.
+        // Do not span existing rows or overlay the built-in Quick Actions and
+        // brightness controls. The added row is removed on mod unload.
+        g_target = winrt::make_weak(target);
+        if (nativeRows == 0) {
+            wuxc::RowDefinition nativeRow;
+            nativeRow.Height(wux::GridLength{1.0, wux::GridUnitType::Star});
+            target.RowDefinitions().Append(nativeRow);
+            g_fallbackNativeRow = winrt::make_weak(nativeRow);
+        }
+        wuxc::RowDefinition reservedRow;
+        reservedRow.Height(wux::GridLength{0.0, wux::GridUnitType::Auto});
+        target.RowDefinitions().Append(reservedRow);
+        g_reservationRow = winrt::make_weak(reservedRow);
+        wuxc::Grid::SetRow(card, target.RowDefinitions().Size() - 1);
         const auto columns = target.ColumnDefinitions().Size();
-        if (rows) wuxc::Grid::SetRowSpan(card, rows);
         if (columns) wuxc::Grid::SetColumnSpan(card, columns);
+        g_card = winrt::make_weak(card);
         target.Children().Append(card);
 
-        g_target = winrt::make_weak(target);
-        g_card = winrt::make_weak(card);
         g_slider = winrt::make_weak(slider);
         g_combo = winrt::make_weak(combo);
         g_lockCheckbox = winrt::make_weak(check);
@@ -392,7 +423,7 @@ static bool AttachUi() {
         g_timer.Start();
         g_attached.store(true);
         OnUiTick();
-        Wh_Log(L"Native brightness and AC/DC timeout XAML controls attached");
+        Wh_Log(L"Native brightness and AC/DC timeout controls attached in a reserved Grid row");
         return true;
     } catch (...) {
         Wh_Log(L"XAML insertion failed: %08X",
@@ -463,6 +494,8 @@ static void Worker() {
             uint32_t value = g_brightnessRequest.exchange(kEmpty);
             if (value != kEmpty) {
                 auto result = BrokerCall(2, value);
+                Wh_Log(L"Brightness control request=%u, broker accepted=%d",
+                       value, result.ok ? 1 : 0);
                 Publish(result.ok ? L"亮度已应用" : L"亮度设置失败，请重试");
             }
         }
