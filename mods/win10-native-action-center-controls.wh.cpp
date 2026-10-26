@@ -65,12 +65,20 @@ static constexpr ULONG_PTR kMagic = 0x57484143;
 static constexpr uint32_t kEmpty = 0xFFFFFFFFu;
 
 struct Packet { uint32_t version, command, value, flags; };
-struct Reply { bool ok = false; uint32_t a = 0, b = 0; };
+struct Reply {
+    bool ok = false;
+    uint8_t status = 0xFF;
+    uint32_t a = 0, b = 0;
+};
 
 static std::atomic<bool> g_stopping{false};
 static std::atomic<bool> g_attached{false};
 static std::atomic<HWND> g_window{nullptr};
 static std::atomic<uint32_t> g_brightnessRequest{kEmpty};
+// Only the real broker's WMI failure (status=4) can schedule this fallback.
+// A broker running in read-only test mode returns status=5, which must never
+// cause a physical WinRT brightness write.
+static std::atomic<uint32_t> g_winRtBrightnessRequest{kEmpty};
 static std::atomic<uint32_t> g_timeoutRequest{kEmpty};
 static std::atomic<uint32_t> g_syncLockRequest{0};
 static std::atomic<ULONGLONG> g_brightnessChangeTick{0};
@@ -104,6 +112,12 @@ static wux::DispatcherTimer g_timer{nullptr};
 static winrt::event_token g_sliderToken{}, g_comboToken{}, g_timerToken{};
 static bool g_updatingUi = false;
 static unsigned int g_uiTimerDiagnosticTicks = 0;
+// Created, accessed and released exclusively from the native XAML UI thread.
+static wgd::BrightnessOverride g_winRtBrightness{nullptr};
+static wf::IAsyncOperation<bool> g_brightnessPersist{nullptr};
+static uint32_t g_brightnessPersistValue = kEmpty;
+static uint32_t g_winRtStartValue = kEmpty;
+static ULONGLONG g_winRtStartTick = 0;
 
 static void Publish(std::wstring text, int brightness = -1,
                     int ac = -1, int dc = -1) {
@@ -134,11 +148,11 @@ static Reply BrokerCall(uint32_t command, uint32_t value = 0,
         broker, WM_COPYDATA, reinterpret_cast<WPARAM>(sender),
         reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG | SMTO_BLOCK,
         1800, &raw);
-    if (!sent || ((raw >> 56) & 0xFF) != 0xA5 ||
-        ((raw >> 48) & 0xFF) != 0) {
+    if (!sent || ((raw >> 56) & 0xFF) != 0xA5) {
         return {};
     }
-    return {true,
+    uint8_t status = static_cast<uint8_t>((raw >> 48) & 0xFF);
+    return {status == 0, status,
         static_cast<uint32_t>((raw >> 24) & 0xFFFFFF),
         static_cast<uint32_t>(raw & 0xFFFFFF)};
 }
@@ -213,6 +227,135 @@ static void AppendOption(wuxc::ComboBox const& selector,
     selector.Items().Append(item);
 }
 
+static void ClearWinRtBrightnessOnUiThread() {
+    // No async callbacks capture this mod's code. The save operation is
+    // polled on the XAML UI thread; releasing it cannot call into a DLL that
+    // has already been unloaded.
+    g_brightnessPersist = nullptr;
+    g_brightnessPersistValue = kEmpty;
+    g_winRtStartValue = kEmpty;
+    g_winRtBrightnessRequest.store(kEmpty);
+    try {
+        if (g_winRtBrightness) g_winRtBrightness.StopOverride();
+    } catch (...) {
+        Wh_Log(L"Unable to stop temporary WinRT brightness override");
+    }
+    g_winRtBrightness = nullptr;
+}
+
+static void ReportWinRtPersistenceFailureOnUiThread() {
+    g_brightnessPersist = nullptr;
+    g_brightnessPersistValue = kEmpty;
+    try {
+        if (g_winRtBrightness && g_winRtBrightness.IsOverrideActive()) {
+            // Some Windows packages lack the restricted systemManagement
+            // capability needed for SaveForSystemAsync. A live override may
+            // still be usable while the native Action Center is running.
+            Publish(L"亮度已临时调整，但系统不允许永久保存");
+            return;
+        }
+    } catch (...) {}
+    ClearWinRtBrightnessOnUiThread();
+    Publish(L"备用亮度无法应用或保存，请稍后重试");
+}
+
+static void ProcessWinRtBrightnessOnUiThread() {
+    if (g_stopping.load()) return;
+
+    // Never fall back from a read-only broker refusal (status 5).
+    // The worker only puts requests here when the real WMI provider reports
+    // a write failure (status 4). UI events are not brightness writes.
+    if (!g_brightnessPersist && g_winRtStartValue == kEmpty) {
+        uint32_t value = g_winRtBrightnessRequest.exchange(kEmpty);
+        if (value != kEmpty) {
+            try {
+                if (value > 100) throw winrt::hresult_invalid_argument();
+                // Replace any previous temporary override cleanly. Never
+                // hold two competing override instances simultaneously.
+                if (g_winRtBrightness)
+                    ClearWinRtBrightnessOnUiThread();
+                g_winRtBrightness =
+                    wgd::BrightnessOverride::GetForCurrentView();
+                if (!g_winRtBrightness ||
+                    !g_winRtBrightness.IsSupported())
+                    throw winrt::hresult_error(E_NOTIMPL);
+                // This path is reached only after a genuine broker WMI
+                // failure, never during the explicit read-only test mode.
+                g_winRtBrightness.SetBrightnessLevel(
+                    static_cast<double>(value) / 100.0,
+                    wgd::DisplayBrightnessOverrideOptions::None);
+                g_winRtBrightness.StartOverride();
+                g_winRtStartValue = value;
+                g_winRtStartTick = GetTickCount64();
+                Publish(L"WMI 调节失败，正在确认系统备用亮度通道…");
+                Wh_Log(L"Native WinRT brightness fallback requested=%u",
+                       value);
+            } catch (...) {
+                Wh_Log(L"Native WinRT brightness fallback start failed: 0x%08X",
+                       static_cast<unsigned>(winrt::to_hresult().value));
+                ClearWinRtBrightnessOnUiThread();
+                Publish(L"亮度驱动未接受 WMI 或 WinRT 请求");
+            }
+        }
+    }
+
+    if (g_winRtStartValue != kEmpty && g_winRtBrightness) {
+        try {
+            if (g_winRtBrightness.IsOverrideActive()) {
+                const uint32_t value = g_winRtStartValue;
+                g_winRtStartValue = kEmpty;
+                // SaveForSystemAsync returns IAsyncOperation<bool>, and may
+                // reject callers lacking the restricted systemManagement
+                // capability. Do not block the UI thread waiting for it.
+                g_brightnessPersist =
+                    wgd::BrightnessOverride::SaveForSystemAsync(
+                        g_winRtBrightness);
+                g_brightnessPersistValue = value;
+                Publish(L"备用亮度已生效，正在保存系统设置…");
+                Wh_Log(L"Native WinRT brightness active; persisting %u",
+                       value);
+            } else if (GetTickCount64() - g_winRtStartTick > 1700) {
+                Wh_Log(L"Native WinRT brightness not honored by Windows");
+                ClearWinRtBrightnessOnUiThread();
+                Publish(L"系统未允许备用亮度覆盖");
+            }
+        } catch (...) {
+            Wh_Log(L"Native WinRT brightness verification failed: 0x%08X",
+                   static_cast<unsigned>(winrt::to_hresult().value));
+            ClearWinRtBrightnessOnUiThread();
+            Publish(L"备用亮度通道不可用");
+        }
+    }
+
+    if (g_brightnessPersist) {
+        try {
+            const auto status = g_brightnessPersist.Status();
+            if (status == wf::AsyncStatus::Completed) {
+                const bool saved = g_brightnessPersist.GetResults();
+                const uint32_t value = g_brightnessPersistValue;
+                Wh_Log(L"Native WinRT brightness persistence returned=%d value=%u",
+                       saved ? 1 : 0, value);
+                if (saved) {
+                    ClearWinRtBrightnessOnUiThread();
+                    Publish(L"已通过系统备用接口永久保存亮度",
+                            static_cast<int>(value));
+                } else {
+                    ReportWinRtPersistenceFailureOnUiThread();
+                }
+            } else if (status == wf::AsyncStatus::Error ||
+                       status == wf::AsyncStatus::Canceled) {
+                Wh_Log(L"Native WinRT brightness persistence failed; status=%d",
+                       static_cast<int>(status));
+                ReportWinRtPersistenceFailureOnUiThread();
+            }
+        } catch (...) {
+            Wh_Log(L"Native WinRT brightness save failed: 0x%08X",
+                   static_cast<unsigned>(winrt::to_hresult().value));
+            ReportWinRtPersistenceFailureOnUiThread();
+        }
+    }
+}
+
 static void OnUiTick() {
     if (g_stopping.load()) return;
     Status data;
@@ -275,6 +418,7 @@ static void OnUiTick() {
 }
 
 static void RemoveUi() {
+    ClearWinRtBrightnessOnUiThread();
     try {
         if (g_timer) {
             g_timer.Stop();
@@ -486,6 +630,7 @@ static bool AttachUi() {
                 if (++g_uiTimerDiagnosticTicks <= 3)
                     Wh_Log(L"Native controls DispatcherTimer tick #%u",
                            g_uiTimerDiagnosticTicks);
+                ProcessWinRtBrightnessOnUiThread();
                 OnUiTick();
             });
         g_timer.Start();
@@ -562,9 +707,21 @@ static void Worker() {
             uint32_t value = g_brightnessRequest.exchange(kEmpty);
             if (value != kEmpty) {
                 auto result = BrokerCall(2, value);
-                Wh_Log(L"Brightness control request=%u, broker accepted=%d",
-                       value, result.ok ? 1 : 0);
-                Publish(result.ok ? L"亮度已应用" : L"亮度设置失败，请重试");
+                Wh_Log(L"Brightness control request=%u, broker accepted=%d status=%u",
+                       value, result.ok ? 1 : 0,
+                       static_cast<unsigned>(result.status));
+                if (result.ok) {
+                    Publish(L"亮度已通过 WMI 校验并应用");
+                } else if (result.status == 4) {
+                    // The ordinary broker attempted WMI and reported failure.
+                    // Only then use the native Action Center WinRT fallback.
+                    g_winRtBrightnessRequest.store(value);
+                    Publish(L"WMI 亮度设置失败，尝试系统备用通道…");
+                } else if (result.status == 5) {
+                    Publish(L"测试只读模式：亮度写入已被安全拦截");
+                } else {
+                    Publish(L"亮度请求未获授权或设置代理未连接");
+                }
             }
         }
 
